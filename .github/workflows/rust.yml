@@ -5,6 +5,8 @@
 #       uses: CraterCore/.github/.github/workflows/rust.yml@main
 #       with:
 #         idp-image: ghcr.io/cratercore/accounts:0.6.0   # opcional
+#       secrets:
+#         crater-rs-deploy-key: ${{ secrets.CRATER_RS_DEPLOY_KEY }}   # si depende de crater-rs
 name: rust
 
 on:
@@ -14,6 +16,10 @@ on:
         description: Imagen de accounts para las pruebas que necesitan el IdP real (corre `cargo test -- --include-ignored`)
         type: string
         default: ""
+    secrets:
+      crater-rs-deploy-key:
+        description: Deploy key de solo lectura en CraterCore/crater-rs (repos que dependen de crater-kit o crater-sso)
+        required: false
 
 jobs:
   check:
@@ -32,6 +38,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1 # lee rust-toolchain.toml
+      # crater-rs es privado: Cargo lo baja por SSH con la deploy key del repo que llama.
+      - name: Acceso de lectura a crater-rs
+        env:
+          KEY: ${{ secrets.crater-rs-deploy-key }}
+        run: |
+          [ -z "$KEY" ] && exit 0
+          eval "$(ssh-agent -s)" && echo "$KEY" | ssh-add -
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          mkdir -p ~/.ssh && echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> ~/.ssh/known_hosts
+          git config --global url."ssh://git@github.com/CraterCore/".insteadOf "https://github.com/CraterCore/"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
 
