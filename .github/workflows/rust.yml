@@ -1,0 +1,70 @@
+# CI de Rust para los repos de CraterCore: fmt, clippy, pruebas con Postgres y cargo audit.
+# Uso desde un repo (el que llama debe dar `packages: read` si pasa `idp-image`):
+#   jobs:
+#     rust:
+#       uses: CraterCore/.github/.github/workflows/rust.yml@main
+#       with:
+#         idp-image: ghcr.io/cratercore/accounts:0.6.0   # opcional
+name: rust
+
+on:
+  workflow_call:
+    inputs:
+      idp-image:
+        description: Imagen de accounts para las pruebas que necesitan el IdP real (corre `cargo test -- --include-ignored`)
+        type: string
+        default: ""
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: crater
+          POSTGRES_PASSWORD: crater
+          POSTGRES_DB: accounts_db
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U crater" --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://crater:crater@localhost:5432/postgres # #[sqlx::test] crea una base por test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1 # lee rust-toolchain.toml
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+      - name: IdP de pruebas
+        if: inputs.idp-image != ''
+        env:
+          IMAGE: ${{ inputs.idp-image }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          # La KEK es la constante KEY de las pruebas: nada de esto es un secreto real.
+          docker run -d --name idp --network host \
+            -e APP_ENV=local -e PORT=8000 \
+            -e DATABASE_URL=postgres://crater:crater@127.0.0.1:5432/accounts_db \
+            -e ACCOUNTS_ISSUER=http://127.0.0.1:8000 \
+            -e ACCOUNTS_KEK=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= \
+            "$IMAGE"
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:8000/readyz && exit 0; sleep 1; done
+          docker logs idp; exit 1
+
+      - run: cargo test
+        if: inputs.idp-image == ''
+      - run: cargo test -- --include-ignored
+        if: inputs.idp-image != ''
+        env:
+          CRATER_TEST_IDP_IMAGE: ${{ inputs.idp-image }}
+
+  # Vulnerabilidades conocidas en dependencias. Las excepciones justificadas viven en .cargo/audit.toml.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
